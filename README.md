@@ -13,7 +13,18 @@ Mobile dashboard and cloud **paper-trading only** experiment. No real orders, wa
 - Signals are generated after a candle closes and simulated at the next candle open. Delayed runs replay missing closed candles in order. This is an OHLC simulation, not exchange execution. If both stop and target touch, stop takes precedence.
 - First startup begins at 100,000; historical profits are never fabricated. A strategy signal may take time; no trade is forced to fill the screen.
 
-Despite the project name, this version uses a transparent rules-based strategy, not a trained AI model. It does not promise profits.
+## Trained ML filter (v2)
+
+EMA entries now require approval from a supervised logistic regression model in `ai_model.py`. It is trained with batch gradient descent and L2 regularization, using six price-derived features: 1/3/12-candle returns, EMA gap, 12-candle volatility and candle body. No paid API, LLM service or keys.
+
+- Fetches ~6,000 public 5m candles (~20.8 days); fixed 15-minute label: next open to third candle close must beat both commissions and expected slippage. This label is not the profit outcome of the actual stop/target strategy.
+- Chronological 75% training / 25% validation, purging 3 samples between sets. Scaler is fitted on training only. Latest 3 examples have no labels yet and are excluded. No shuffled split or future features.
+- Stored model retrains every 12 hours using only candles closed by the signal time. Backfilled candles cannot use a future-trained model.
+- New entries require validation log loss below a constant forecast based on training class frequency and model score >=55%. Insufficient data, single-class training, or failed validation block entries. EMA exits and protective stops are never blocked by ML.
+- Dashboard shows the score, accuracy vs majority-class baseline, log losses, sample counts and validation period. Scores are uncalibrated estimates; a 60% score is not a verified 60% chance of trade profit. Historical metrics and the validation gate are experimental and do not prove an edge. A longer untouched forward paper test is still needed.
+- Existing balance, open positions and closed trades are preserved on upgrade. An old, unfiltered pending buy is cancelled. ML counters start with the upgrade; older trades remain part of the portfolio and must not be attributed to ML.
+
+It does not promise profits.
 
 ## Cloud hosting
 

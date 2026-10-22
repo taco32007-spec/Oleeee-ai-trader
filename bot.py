@@ -6,6 +6,7 @@ import shutil
 import time
 import urllib.request
 from pathlib import Path
+import ai_model as ml
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / 'docs' / 'state.json'
@@ -88,6 +89,25 @@ def step(s, row, intent):
     s['last'] = row['t']
 
 
+def ai_intent(s, rows, i):
+    ai = s.setdefault('ai', dict(model=None, latest=None, approved=0, blocked=0))
+    model = ai.get('model')
+    asof = rows[i]['t']+INTERVAL
+    if not model or model.get('version') != ml.VERSION or asof-model['asof'] >= ml.RETRAIN_MS:
+        # Never train against later candles when replaying a delayed run.
+        ratio = (1+SLIPPAGE)*(1+FEE)/((1-SLIPPAGE)*(1-FEE))
+        model = ml.train(rows[:i+1],ratio)
+        ai['model'] = model
+    if model['asof'] > asof:
+        raise ValueError('Model trained on future data; simulation paused')
+    base = signal(rows,i)
+    intent, score, reason = ml.decision(model,ml.features(rows,i),base)
+    ai['latest'] = dict(t=asof, score=score, reason=reason, ema=base['side'] if base else 'wait')
+    if base and base['side'] == 'buy':
+        ai['approved' if intent else 'blocked'] += 1
+    return intent
+
+
 def process(s, rows, now):
     rows = sorted(rows, key=lambda r:r['t'])
     if len(rows) < 32:
@@ -96,10 +116,18 @@ def process(s, rows, now):
         raise ValueError('Candle gap or duplicate; simulation paused')
     if now-(rows[-1]['t']+INTERVAL) > INTERVAL*2:
         raise ValueError('Market data is stale; simulation paused')
+    if 'ai' not in s and s['last'] is not None:
+        # On upgrade, cancel unfiltered entry intent; preserve portfolio and exits.
+        if s.get('pending') and s['pending']['side'] == 'buy':
+            s['pending'] = None
+        existing = next((i for i,r in enumerate(rows) if r['t'] == s['last']),None)
+        if existing is not None:
+            ai_intent(s,rows,existing)
+    s['version'] = 2
     # Start now, with empty history: never present backtest profit as live paper profit.
     if s['last'] is None:
         s['last'] = rows[-1]['t']
-        s['pending'] = signal(rows, len(rows)-1)
+        s['pending'] = ai_intent(s, rows, len(rows)-1)
         s['equity'] = [dict(t=s['last']+INTERVAL, value=CAPITAL)]
     else:
         timestamps = [r['t'] for r in rows]
@@ -109,7 +137,7 @@ def process(s, rows, now):
             if row['t'] > s['last']:
                 if i < 30:
                     raise ValueError('Insufficient indicator warmup after downtime')
-                step(s, row, signal(rows, i))
+                step(s, row, ai_intent(s, rows, i))
     s['candles'] = rows[-160:]
     s['updated'] = now
     s['error'] = None
@@ -119,8 +147,17 @@ def process(s, rows, now):
 def fetch():
     url = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000'
     # No keys, signed endpoints, order methods, exchange SDKs, or account access exist.
-    with urllib.request.urlopen(url, timeout=25) as response:
-        raw = json.load(response)
+    raw = []
+    end = None
+    # ~20.8 days of closed 5m candles; only six public market-data GETs.
+    for _ in range(6):
+        page_url = url + (f'&endTime={end}' if end is not None else '')
+        with urllib.request.urlopen(page_url, timeout=25) as response:
+            page = json.load(response)
+        if not isinstance(page,list) or not page:
+            raise ValueError('Empty or invalid candle response')
+        raw = page + raw
+        end = int(page[0][0])-1
     now = int(time.time()*1000)
     rows = []
     for k in raw:
