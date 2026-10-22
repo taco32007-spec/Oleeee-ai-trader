@@ -1,0 +1,59 @@
+name: Paper trader and mobile dashboard
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/state.json']
+  schedule:
+    - cron: '2-57/5 * * * *'
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: tasman-paper
+  cancel-in-progress: false
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      result: ${{ steps.paper.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test execution and accounting
+        run: python -m unittest discover -s . -p test_bot.py -v
+      - name: Process closed candles (paper only)
+        id: paper
+        continue-on-error: true
+        run: python bot.py
+      - name: Persist virtual portfolio
+        run: |
+          git config user.name 'tasman-paper[bot]'
+          git config user.email 'tasman-paper[bot]@users.noreply.github.com'
+          git add docs/state.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update paper portfolio [skip ci]'
+            git push
+          fi
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+  deploy:
+    needs: simulate
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish mobile dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Surface market-data failure
+        if: needs.simulate.outputs.result == 'failure'
+        run: |
+          echo 'Market data failed; published last saved portfolio with an error banner.'
+          exit 1
