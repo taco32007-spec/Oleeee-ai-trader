@@ -109,4 +109,64 @@ class MLTests(unittest.TestCase):
         s=bot.fresh();s['ai']=dict(model=dict(version=ml.VERSION,asof=999999999),latest=None,approved=0,blocked=0)
         with self.assertRaises(ValueError):bot.ai_intent(s,rows,99)
 
+
+class SyntheticTests(unittest.TestCase):
+    def test_repeatable_generator_and_causal_observations(self):
+        import synthetic_lab as lab
+        rows=lab.market(123)
+        self.assertEqual(rows,lab.market(123))
+        self.assertNotEqual(rows,lab.market(124))
+        self.assertEqual(lab.observations(rows)[100],lab.observations(rows[:101])[100])
+
+    def test_cash_and_untrained_evaluation_do_not_trade(self):
+        import synthetic_lab as lab
+        q={}
+        self.assertEqual(lab.run(60000,q)['return_pct'],0)
+        self.assertEqual(q,{})
+        self.assertEqual(lab.run(60000,baseline='cash')['fees'],0)
+
+    def test_round_trip_costs_and_risk(self):
+        import synthetic_lab as lab
+        w=lab.Wallet();row=dict(o=100,c=100,h=100,l=100)
+        w.advance(row,1)
+        self.assertLessEqual(w.position['risk'],lab.CAPITAL*lab.RISK+1e-8)
+        self.assertGreaterEqual(w.cash,0)
+        w.advance(row,2)
+        self.assertLess(w.cash,lab.CAPITAL)
+        self.assertEqual(len(w.trades),1)
+        self.assertAlmostEqual(w.cash-lab.CAPITAL,sum(w.trades))
+
+    def test_stop_precedes_target(self):
+        import synthetic_lab as lab
+        w=lab.Wallet();w.advance(dict(o=100,c=100,h=110,l=90),1)
+        self.assertIsNone(w.position)
+        self.assertLess(w.trades[0],0)
+
+    def test_test_policy_is_frozen(self):
+        import copy
+        import synthetic_lab as lab
+        q={};lab.run(1000,q,training=True,epsilon=.3,bars=100)
+        snapshot=copy.deepcopy(q)
+        lab.run(60000,q)
+        self.assertEqual(q,snapshot)
+        self.assertGreater(len(q),0)
+
+    def test_disjoint_seed_ranges(self):
+        import synthetic_lab as lab
+        train=set(range(1000,1000+lab.TRAIN_EPISODES))
+        self.assertFalse(train.intersection(lab.VALIDATION_SEEDS))
+        self.assertFalse(train.intersection(lab.TEST_SEEDS))
+        self.assertFalse(set(lab.VALIDATION_SEEDS).intersection(lab.TEST_SEEDS))
+
+    def test_frozen_report_matches_replayed_metrics(self):
+        import json
+        import synthetic_lab as lab
+        report=json.loads((bot.ROOT/'synthetic_report.json').read_text())
+        self.assertEqual(report['version'],lab.VERSION)
+        self.assertEqual(len(report['test_returns']),100)
+        result=lab.run(lab.TEST_SEEDS[0],report['q'])
+        self.assertAlmostEqual(result['return_pct'],report['test_returns'][0],places=9)
+        self.assertEqual(result['equity'],report['example_equity'])
+        self.assertAlmostEqual(sum(report['test_returns'])/100,report['test']['mean'])
+
 if __name__=='__main__': unittest.main()

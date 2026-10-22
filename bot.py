@@ -7,6 +7,7 @@ import time
 import urllib.request
 from pathlib import Path
 import ai_model as ml
+import synthetic_lab
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / 'docs' / 'state.json'
@@ -182,6 +183,7 @@ def save(s):
 def main():
     STATE.parent.mkdir(exist_ok=True)
     shutil.copyfile(ROOT / 'index.html', ROOT / 'docs' / 'index.html')
+    synthetic_lab.ensure(ROOT)
     s = json.loads(STATE.read_text()) if STATE.exists() else fresh()
     try:
         rows, now = fetch()

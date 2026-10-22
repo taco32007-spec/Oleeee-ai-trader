@@ -43,3 +43,16 @@ python -m http.server 8000 --directory docs
 ```
 
 Repository state and history are the durable portfolio record. Do not edit `state.json` while a workflow runs. To change the engine, edit `bot.py` and run tests. To stop it, disable the workflow in Actions. Strategy and settings are intentionally read-only in the public dashboard.
+
+
+## Artificial market training lab (v3)
+
+Open the **Artificial market / training** tab, or `#lab`. This is isolated from the BTC paper wallet and the logistic entry filter. `synthetic_lab.py` implements tabular Q-learning with no third-party dependencies. `synthetic_report.json` contains the frozen learned Q-table, full test returns and experiment metadata; the workflow copies it into `docs/lab.json` for the dashboard.
+
+- 1,200 episodes of 384 five-minute candles, 100,000 virtual USDT reset each episode; 20 bars of warmup. 435,600 training decisions. Agent sees only causal 3/12-bar returns, EMA gap and position status, never the generator's hidden regime or future prices.
+- Mixed random upward/downward trends and mean-reverting periods. This deliberately learnable synthetic process is not a calibrated model of real BTC.
+- Action at closed candle i executes at open i+1. Long only, cash cap, no leverage; planned stop budget <=2% equity; stop 0.8% price, target 2R, stop before target when ambiguous. Costs: 0.1% commission and 0.05% adverse slippage per side. Gaps can exceed stop budget. Terminal liquidation includes costs.
+- Reward is 100 times the log change in net asset value. Q-learning alpha=.08, gamma=.97; epsilon decreases from .30 to .03. Select one of 3 checkpoints using mean return over 40 fixed validation scenarios. Train seeds 1000–2199, validation 50000–50039, untouched final test 60000–60099. No final-test feedback is used to select parameters/checkpoint.
+- Compare final model, untrained wait policy, USDT cash, unrestricted buy-and-hold (different risk, no stop), and a simple EMA-gap policy on the identical test markets. Show mean/median net return, scenario win rate, drawdown and an approximate independent-episode 95% interval. The chart averages independent resets, not a compounded equity curve. Example chart always uses seed 60000, never the best episode.
+- Separate stress seeds 70000–70049 add shocks, double noise scale, fees and slippage. Report the losses as well as normal-case gains. The first frozen experiment is profitable on normal artificial markets but loses on stress markets; robustness and real-market profitability are not established.
+- The saved report is cached; ordinary bot refreshes do not silently retrain on or optimize for the test set. Reproduce the fixed experiment with `python synthetic_lab.py --retrain`; `python synthetic_lab.py` only publishes the saved result. For future strategy tuning, reserve a NEW final-test seed range and preserve prior test outcomes.
