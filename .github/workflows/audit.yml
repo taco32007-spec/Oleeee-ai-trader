@@ -1,0 +1,114 @@
+name: Audit rejected ML entries
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/audit.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct decisions and counterfactual portfolios
+        run: |
+          cat > /tmp/audit_filter.py <<'PYCODE'
+          """Read-only reconstruction of recorded ML decisions using historical model snapshots."""
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          import bot
+          import ai_model as ml
+          
+          
+          def git(*args):
+              return subprocess.check_output(['git',*args],text=True)
+          
+          
+          def audit():
+              assert git('rev-parse','--is-shallow-repository').strip()=='false', 'Full history required'
+              current=json.loads(Path('docs/state.json').read_text())
+              models={}
+              for sha in git('log','--reverse','--format=%H','--','docs/state.json').splitlines():
+                  s=json.loads(git('show',f'{sha}:docs/state.json'))
+                  m=s.get('ai',{}).get('model')
+                  if m:
+                      key=m['asof']
+                      if key in models:
+                          assert models[key]==m, 'Conflicting historical model'
+                      models[key]=m
+              assert models,'No stored ML models'
+              rows,now=bot.fetch()
+              rows=[r for r in rows if r['t']<=current['last']]
+              assert all(b['t']-a['t']==bot.INTERVAL for a,b in zip(rows,rows[1:])), 'Candle gaps'
+              start=min(models)
+              indexes=[i for i,r in enumerate(rows) if r['t']+bot.INTERVAL>=start]
+              assert indexes and indexes[0]>=201,'Insufficient warmup/history'
+              intents={};rejected=[];approved=[]
+              for i in indexes:
+                  at=rows[i]['t']+bot.INTERVAL
+                  model=models[max(t for t in models if t<=at)]
+                  assert model['asof']<=at
+                  base=bot.signal(rows,i)
+                  intent,score,reason=ml.decision(model,ml.features(rows,i),base)
+                  intents[i]=intent
+                  if base and base['side']=='buy':
+                      event=dict(t=at,score=score,model_asof=model['asof'],reason=reason,index=i)
+                      (approved if intent else rejected).append(event)
+              def portfolio(filtered):
+                  s=bot.fresh()
+                  first=indexes[0]
+                  s['last']=rows[first]['t']
+                  s['pending']=intents[first] if filtered else bot.signal(rows,first)
+                  for i in indexes[1:]:
+                      bot.step(s,rows[i],intents[i] if filtered else bot.signal(rows,i))
+                  equity=s['cash']+(s['position']['qty']*rows[-1]['c'] if s['position'] else 0)
+                  return dict(capital=100000,equity=equity,pnl=equity-100000,return_pct=(equity/100000-1)*100,
+                              closed_trades=len(s['trades']),open_position=s['position'] is not None,trades=s['trades'])
+              for event in rejected:
+                  i=event['index'];s=bot.fresh();s['pending']=bot.signal(rows,i)
+                  for j in range(i+1,len(rows)):
+                      bot.step(s,rows[j],bot.signal(rows,j))
+                      if s['trades']:
+                          break
+                  if s['trades']:
+                      t=s['trades'][0]
+                      event.update(outcome='win' if t['pnl']>0 else 'loss',pnl=t['pnl'],trade=t)
+                  else:
+                      event.update(outcome='unfinished',pnl=None)
+              completed=[e for e in rejected if e['pnl'] is not None]
+              report=dict(asof=current['updated'],signal_start=start,signal_end=rows[-1]['t']+bot.INTERVAL,
+                          model_snapshots=len(models),historical_model_times=sorted(models),
+                          current_wallet=dict(cash=current['cash'],closed_trades=len(current['trades'])),
+                          recorded_rejected=current['ai']['blocked'],recorded_approved=current['ai']['approved'],
+                          reconstructed_rejected=len(rejected),reconstructed_approved=len(approved),
+                          counts_match=len(rejected)==current['ai']['blocked'] and len(approved)==current['ai']['approved'],
+                          rejected_wins=sum(e['outcome']=='win' for e in rejected),
+                          rejected_losses=sum(e['outcome']=='loss' for e in rejected),
+                          unfinished=len(rejected)-len(completed),
+                          mean_isolated_pnl=sum(e['pnl'] for e in completed)/len(completed) if completed else None,
+                          no_filter=portfolio(False),with_filter=portfolio(True),events=rejected,
+                          limitations='Each rejected entry is independently simulated from 100000 USDT; isolated PnLs must not be summed as a real portfolio. Sequential portfolio comparison uses one position, same period/costs/stops. Historical model weights are reused, not refit. Initialization may count a signal cancelled at upgrade. Results are retrospective paper simulations; no threshold selected on these outcomes.')
+              Path('audit_report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+              summary={k:v for k,v in report.items() if k not in ('events','no_filter','with_filter')}
+              for name in ('no_filter','with_filter'):
+                  summary[name]={k:v for k,v in report[name].items() if k!='trades'}
+              text=json.dumps(summary,ensure_ascii=False,indent=2)
+              print(text)
+              if os.environ.get('GITHUB_STEP_SUMMARY'):
+                  Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('# Filter audit\n\n```json\n'+text+'\n```\n')
+          
+          if __name__=='__main__':audit()
+          PYCODE
+          PYTHONPATH="$GITHUB_WORKSPACE" python /tmp/audit_filter.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filter-audit
+          path: audit_report.json
